@@ -1,0 +1,344 @@
+create or replace PROCEDURE            PROC_GEN_OUTAGE_FILE IS
+
+/**********************************************************************************************************************************
+
+   NAME:      PROC_GEN_OUTAGE_FILE
+
+   PURPOSE:   This procedure will extract the Unique siteid outage data from NORS DB and put it into a file, which will be put on server to be 
+              send to TFCC for sending text messages about outage status, as per CCA (Customer Communicaiton Automation) project.
+              Only those siteids are out into the file which are currently being impacted by an un-restored outage. If outage, closes, its impacted sites will not be put again.
+              ETOR in NORS can be system generated, set by crew in Ventyx or set by dispatcher. Logic has been put to identify whether the current ETOR for an outage was
+              updated by ventyx crew (V) or by dispatcher (D). If either did not update it, it will be assumed to be updated by system (S). This flag will be appended to 
+              final record being written to the file.
+              Also, a file is generated to hold only those records which have duplicate siteids.
+
+   REVISIONS HISTORY:
+   Ver        	Date        	Author           	Description
+   ---------  	----------  	---------------  	------------------------------------
+     1.0        12/12/2014    Ankit Vohra		    Initial Program
+
+change GENFILE_DIR directory
+--utl_file.put_line(v_os_data_file, 'Date:'||to_char(SYSDATE, 'MM/DD/YYYY HH:MI:SS') );
+--Pre requisites
+Create view VW_GEN_OUTAGE_FILE...
+CREATE TABLE DUP_SITES_CCA AS SELECT SiteId from VW_GEN_OUTAGE_FILE group by SiteId having count(1) >1;
+create table msg_cca(msg varchar2(400),dt varchar2(500));
+***********************************************************************************************************************************/
+
+--DECLARE
+
+
+v_program_name			VARCHAR2(50)	:= UPPER('PROC_GEN_OUTAGE_FILE');
+v_data_file			    VARCHAR2(50)	:= 'NORS_Outage_data_CCA.csv';
+v_dups_file			    VARCHAR2(50)	:= 'Dup_Sites.csv';
+v_trg_file	        VARCHAR2(50)	:= 'NORS_Outage_data_CCA.csv.trg';
+v_os_data_file			UTL_FILE.FILE_TYPE;--file handler for Outage data file
+v_os_trg_file			  UTL_FILE.FILE_TYPE;--file handler for trigger file
+v_os_dups_file			UTL_FILE.FILE_TYPE;--file handler for duplicate siteid file
+v_errm              VARCHAR2(200);
+v_rec_count			    PLS_INTEGER	:=	0;--store number of records written to Unique siteid file
+v_rec_count_dup	    PLS_INTEGER	:=	0;--store number of records written to duplicate siteid file
+v_dup_tab_exists    PLS_INTEGER	:=	0;
+v_dup_cnt           PLS_INTEGER	:=	0;--stores count of unique duplicate siteids 
+--ETOR flag calculation related variables Begin
+v_etor_flag         VARCHAR2(1) := 'X';--Initial value of ETOR flag
+v_ventyx_db_flag    PLS_INTEGER := 0;--stores Ventyx DB status (UP or DOWN)
+v_ventyx_etor       VARCHAR2(200) := '';
+v_disp_etor         VARCHAR2(200) := '';
+l_start_time0       PLS_INTEGER	:=	0; --start time of full job
+l_start_time        PLS_INTEGER	:=	0;
+v_prev_outage_id    PLS_INTEGER	:=	0;
+v_prev_etor_flag    VARCHAR2(1) := '';
+v_ven_cnt           PLS_INTEGER	:=	0;--store Ventyx fetched cnt
+v_disp_cnt          PLS_INTEGER	:=	0;--store dispatcher updated cnt
+
+--Index by table to hold ETOR values set by Ventyx crews
+TYPE ventyx_etor_tab IS TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+v_ventyx_etor_tab ventyx_etor_tab;
+
+--Index by table to hold ETOR values set by Dispatcher
+TYPE disp_etor_tab IS TABLE OF VARCHAR2(100) INDEX BY PLS_INTEGER;
+v_disp_etor_tab disp_etor_tab;
+--ETOR flag calculation related variables End
+
+--This function calculates ETOR flag for passed Outage# and ETOR value. 
+--This functionality is put in subprogram function as it was called from 2 places, Unique siteid and duplicate siteid outage data file. 
+FUNCTION calc_etor_flag (OutageID PLS_INTEGER, etor VARCHAR2, v_ventyx_db_flag PLS_INTEGER,v_etor_flag IN OUT VARCHAR2) 
+RETURN VARCHAR2 IS       
+BEGIN
+     --Check if current ETOR (i.etor) was updated by crew in Ventyx. If yes, set etor flag as 'V' if the etor flag is still 'X' (i.e. still not set)
+    IF (v_ventyx_db_flag = 1 AND v_etor_flag = 'X') THEN
+        IF v_ventyx_etor_tab.EXISTS(OutageID)  THEN
+        
+            --fetch Ventyx ETOR from pl/sql collection 
+            v_ventyx_etor := v_ventyx_etor_tab (OutageID);    
+        
+            --If there is a record in Ventyx, Compare Ventyx and outage repair ETOR dates. Comparing till Minute value.
+            --This comparison is done to ensure that flag will be set only if Ventyx ETOR is = current ETOR in NORS. 
+            IF SUBSTR(v_ventyx_etor,1,15) = SUBSTR(etor,1,15) THEN
+                v_etor_flag := 'V';
+            END IF;
+        END IF; 
+
+    END IF;
+    
+    --If the current ETOR was not found in Ventyx, check if it was updated by dispatcher. If yes, set etor flag as 'D'
+    IF (v_etor_flag = 'X') THEN
+          IF v_disp_etor_tab.EXISTS(OutageID)  THEN
+          
+            --fetch dispatcher ETOR from pl/sql collection 
+            v_disp_etor := v_disp_etor_tab (OutageID);
+                     
+            --If there was an update made by dispatcher, compate dispatcher and outage repair ETOR dates. Comparing till minute value.
+            --This comparison is done to ensure that flag will be set only if Dispatcher set ETOR is = current ETOR in NORS. 
+            IF SUBSTR(v_disp_etor,1,15) = SUBSTR(etor,1,15) THEN
+              v_etor_flag := 'D';
+            END IF; 
+          END IF;  
+       
+    END IF;
+    
+    --If current ETOR (etor) was not updated by either crew (Ventyx) or dispatcher, it will be assumed to be updated by System (i.e. etor flag will be 'S')  
+    IF v_etor_flag NOT IN ('D','V') THEN
+        v_etor_flag := 'S';
+    END IF;
+    
+    RETURN v_etor_flag;
+END;
+
+BEGIN
+  
+  --Get start time for calculating total time taken by whole job in the end
+  l_start_time0 := DBMS_UTILITY.get_time;
+
+  --Cleaning records older than 100 days from log table 
+  DELETE msg_cca 
+  WHERE  ROUND(TRUNC(sysdate) - TRUNC(TO_TIMESTAMP(dt,'DD-MON-YYYY HH24:MI:SS.FF')) ) > 90;
+  
+  --Below block gets all crew updated ETOR values for unrestored outages from VENTYX database (if its UP) and puts it into pl/sql table v_ventyx_etor_tab.
+  BEGIN
+        SELECT 1 into v_ventyx_db_flag FROM DUAL@VENTYX;
+        
+        --If ventyx is up, only then fetch the updated ETOR data from Ventyx. If up, then Fetch MAX date for each UN-RESTORED outage. 
+        IF v_ventyx_db_flag = 1 THEN
+
+            l_start_time := DBMS_UTILITY.get_time;
+            FOR r IN (
+                    SELECT e.adv_order_summary_field_018 AS OUTAGE_NO, 
+                              TO_CHAR( MAX (CAST((FROM_TZ(CAST(a.occurred_at AS TIMESTAMP),'+00:00') AT TIME ZONE 'US/Central') AS DATE) 
+                                                  + e.estimated_to_complete/86400) , 'DD-MON-YY HH.MI.SS AM' )  AS VENTYX_ETOR
+                    FROM edgrt_hdb.elog_event@ventyx a,edgrt_hdb.lab_user@ventyx b,edgrt_hdb.cnd_event_def@ventyx c
+                            ,edgrt_hdb.elog_param@ventyx d,edgrt_hdb.ord_order@ventyx e
+                            ,OUTAGE_REPAIR o,   CREW_ACTIVITY  ca
+                    WHERE a.for_user = b.user_id(+)
+                    AND a.event_type = c.event_def_id
+                    AND d.event = a.event_id
+                    AND d.entity_key = e.order_id  and e.order_num like 'N%'
+                    AND c.core_description   = 'OrdEstimatedToCompleteUpdate_evt' 
+                    AND e.order_num = 'N'||LPAD(ca.id,10,'0')
+                    AND  o.outage_no = ca.assignment_no
+                    AND o.outage_no = e.adv_order_summary_field_018 AND o.rest_done <> 'X' AND o.rest_date IS NULL
+                    GROUP BY e.adv_order_summary_field_018 
+                    ) LOOP
+            
+                    --get Ventyx ETORs against each outage#
+                    v_ventyx_etor_tab (r.OUTAGE_NO) := r.VENTYX_ETOR; 
+              END LOOP; 
+              DBMS_OUTPUT.put_line('fetched '||v_ventyx_etor_tab.COUNT|| ' eligible records from ventyx in ' || 
+                                TO_CHAR( ROUND((DBMS_UTILITY.get_time - l_start_time)/100,2) )||'s');  
+        END IF;
+      EXCEPTION
+          WHEN OTHERS THEN
+          ROLLBACK;
+          v_ventyx_db_flag := 0;
+          v_errm := SUBSTR(SQLERRM, 1 , 200);
+          DBMS_OUTPUT.put_line('Ventyx is down');
+          INSERT INTO msg_cca VALUES (V_PROGRAM_NAME||' X: Ventyx is down=>'||v_errm||' :: '||DBMS_UTILITY.format_error_backtrace,to_char(systimestamp,'dd-MON-yyyy hh24:mi:ss.FF'));
+          COMMIT;
+  END;
+  
+   --Below block fetchs dispatcher data, only for UN-RESTORED outages, into pl/sql table to avoid multiple DB trips later on
+  BEGIN
+            l_start_time := DBMS_UTILITY.get_time;
+            
+      FOR s IN (
+                SELECT l.outage_no AS OUTAGE_NO,TO_CHAR(MAX(l.new_date), 'DD-MON-YY HH.MI.SS AM' ) AS DISP_ETOR  
+                FROM OUTAGE_REPAIR o,   OUTAGE_LOG l
+                WHERE o.outage_no = l.outage_no
+                AND l.event_type = 'ETR_CHANGE'
+                AND l.operator_id NOT IN ('SYSTEM','ABB ENGINE')
+                AND o.REST_DONE <> 'X' AND o.REST_DATE IS NULL
+                GROUP BY l.outage_no
+              ) LOOP
+              
+                v_disp_etor_tab (s.OUTAGE_NO) := s.DISP_ETOR; 
+            END LOOP;  
+            
+            DBMS_OUTPUT.put_line('fetched '||v_disp_etor_tab.COUNT|| ' eligible records from OUTAGE_LOG in ' || 
+            TO_CHAR( ROUND((DBMS_UTILITY.get_time - l_start_time)/100,2) )||'s');    
+      EXCEPTION
+            WHEN OTHERS THEN
+            ROLLBACK;
+            v_errm := SUBSTR(SQLERRM, 1 , 200);
+            DBMS_OUTPUT.put_line('Error fetching dispatcher data');
+            INSERT INTO msg_cca VALUES (V_PROGRAM_NAME||' X: Error fetching dispatcher data=>'||v_errm||' :: '||DBMS_UTILITY.format_error_backtrace,to_char(systimestamp,'dd-MON-yyyy hh24:mi:ss.FF'));
+            COMMIT;
+  END;
+
+--Storing above fethed table counts just for logging purpose
+v_ven_cnt := v_ventyx_etor_tab.COUNT ;
+v_disp_cnt := v_disp_etor_tab.COUNT ; 
+
+--================== Drop if duplicate siteid table already exists ===============================
+SELECT 1 INTO v_dup_tab_exists FROM USER_TABLES WHERE TABLE_NAME = 'DUP_SITES_CCA';
+IF v_dup_tab_exists = 1 THEN
+  EXECUTE IMMEDIATE 'DROP TABLE DUP_SITES_CCA PURGE';
+ELSE
+  NULL;
+  --DBMS_OUTPUT.PUT_LINE ('DUP_SITES does not exist');
+END IF;
+
+--create it with duplicate site id data
+EXECUTE IMMEDIATE 'CREATE TABLE DUP_SITES_CCA AS
+SELECT SiteId FROM VW_GEN_OUTAGE_FILE GROUP BY SiteId HAVING COUNT(1) >1 ' ;
+
+v_dup_cnt := SQL%ROWCOUNT;
+DBMS_OUTPUT.PUT_LINE ('Count of duplicate site ids :' || to_char(v_dup_cnt) );
+--================== END ===============================
+
+DBMS_OUTPUT.put_line('******** Processing Unique siteids for ETOR flag ***********');
+
+v_etor_flag := 'X';  
+v_prev_outage_id := 0;
+v_prev_etor_flag := '';
+--================== Put only unique siteids into main outage file ===============================
+v_os_data_file	:= UTL_FILE.FOPEN('GENFILE_DIR',v_data_file, 'w');
+UTL_FILE.PUT_LINE(v_os_data_file, 'SiteId,Address,Zip,OutageStatus,ETOR,CauseCode,OutageID,LOA,Called_In,Frozen_Flag,ETOR_Flag');
+
+FOR i IN (SELECT dtl_record,siteid,outageid,etor  FROM VW_GEN_OUTAGE_FILE 
+          WHERE siteid NOT IN (SELECT siteid FROM DUP_SITES_CCA)
+          
+          /*
+          UNION                                                                                                                                                                    
+          SELECT dtl_record,siteid,outageid,etor  FROM VW_GEN_OUTAGE_FILE 
+          WHERE siteid IN (SELECT siteid FROM DUP_SITES_CCA ) AND frozen_flag='Y'
+          */
+          ) 
+LOOP
+    
+   IF v_prev_outage_id = i.OutageID THEN
+      --for same outage#, assign previous flag and avoid re-calculation
+      v_etor_flag := v_prev_etor_flag;
+   ELSE 
+      --for different outage, reset the flag to enable re-calculation
+      v_etor_flag := 'X';
+   END IF;
+   
+    --If ETOR flag is not set, then calculate it via function call.
+    IF v_etor_flag = 'X' THEN
+        v_etor_flag := calc_etor_flag (i.OutageID,i.etor,v_ventyx_db_flag,v_etor_flag);
+    END IF; 
+    
+    --Append calculated v_etor_flag to the record before writing to file
+    --if i.siteid='857330003' then v_etor_flag:='S'; END IF; --ankit
+    --if i.siteid='832860000' then v_etor_flag:='S'; END IF; --ankit
+    i.DTL_RECORD := i.DTL_RECORD||','||v_etor_flag;
+    --if i.siteid='857330003' then v_etor_flag:='D'; END IF; --ankit
+    --if i.siteid='832860000' then v_etor_flag:='D'; END IF; --ankit
+    
+    IF v_prev_outage_id <> i.OutageID THEN
+      DBMS_OUTPUT.put_line('v_etor_flag := '||v_etor_flag || ' for outage: '||TO_CHAR(i.OutageID));
+    END IF;
+    
+    --Retain v_etor_flag and outage# for deciding upon re-calculation in the beginning of loop
+    v_prev_etor_flag := v_etor_flag ;
+    v_prev_outage_id := i.OutageID;
+    
+    --Increment counter
+    v_rec_count := v_rec_count + 1;
+    
+    utl_file.put_line(v_os_data_file, i.DTL_RECORD);
+END LOOP;
+
+UTL_FILE.PUT_LINE(v_os_data_file, 'END OF FILE,'||TO_CHAR(v_rec_count));
+UTL_FILE.FCLOSE(v_os_data_file);
+
+--================== END ===============================
+
+DBMS_OUTPUT.put_line('******** Processing duplicate siteids for ETOR flag ***********');
+
+--================== If there are duplicate siteids, put them into new duplicate file ===============================
+IF v_dup_cnt > 0 THEN
+
+    v_os_dups_file	:= UTL_FILE.FOPEN('GENFILE_DIR',v_dups_file, 'w');
+    UTL_FILE.PUT_LINE(v_os_dups_file, 'SiteId,Address,Zip,OutageStatus,ETOR,CauseCode,OutageID,LOA,Called_In,Frozen_Flag,ETOR_Flag');
+    
+    v_etor_flag := 'X';  
+    v_prev_outage_id := 0;
+    v_prev_etor_flag := '';
+
+    FOR i IN (SELECT dtl_record,siteid,outageid,etor  FROM VW_GEN_OUTAGE_FILE 
+              WHERE siteid IN (SELECT siteid FROM DUP_SITES_CCA) ORDER BY siteid
+              ) 
+    LOOP
+        
+        IF v_prev_outage_id = i.OutageID THEN
+            --for same outage#, assign previous flag and avoid re-calculation
+            v_etor_flag := v_prev_etor_flag;
+         ELSE 
+            --for different outage, reset the flag to enable re-calculation
+            v_etor_flag := 'X';
+         END IF;       
+          
+          --If ETOR flag is not set, then calculate it.
+          IF v_etor_flag = 'X' THEN
+              v_etor_flag := calc_etor_flag (i.OutageID,i.etor,v_ventyx_db_flag,v_etor_flag);
+          END IF; 
+          
+          --Append calculated v_etor_flag to the record before writing to file
+          i.DTL_RECORD := i.DTL_RECORD||','||v_etor_flag;
+          
+          IF v_prev_outage_id <> i.OutageID THEN
+            DBMS_OUTPUT.put_line('v_etor_flag := '||v_etor_flag || ' for outage: '||TO_CHAR(i.OutageID));
+          END IF;
+          
+          --Retain v_etor_flag and outage# for deciding upon re-calculation in the beginning of loop
+          v_prev_etor_flag := v_etor_flag ;
+          v_prev_outage_id := i.OutageID;
+          
+          --Increment duplication siteid counter
+          v_rec_count_dup := v_rec_count_dup + 1;
+          
+          utl_file.put_line(v_os_dups_file, i.DTL_RECORD);
+    
+    END LOOP;
+    
+    UTL_FILE.PUT_LINE(v_os_dups_file, 'END OF FILE,'||TO_CHAR(v_rec_count_dup));
+    UTL_FILE.FCLOSE(v_os_dups_file);
+    
+END IF;
+--================== END ===============================    
+
+--================== Create trigger file, with no contents ===============================
+    v_os_trg_file	:= UTL_FILE.FOPEN('GENFILE_DIR',v_trg_file, 'w');
+    UTL_FILE.PUT_LINE(v_os_trg_file, NULL);
+    UTL_FILE.FCLOSE(v_os_trg_file);
+--================== END ===============================        
+
+INSERT INTO msg_cca VALUES (V_PROGRAM_NAME||'. Success. Record count=>'||to_char(v_rec_count)||'. Ventyx: '||to_char(v_ven_cnt)||
+'. Dispatcher: '||to_char(v_disp_cnt)||'. Duplicate: '||to_char(v_dup_cnt)||'. Time taken: '|| TO_CHAR( ROUND((DBMS_UTILITY.get_time - l_start_time0)/100,2) )||'s'
+,to_char(systimestamp,'dd-MON-yyyy hh24:mi:ss.FF'));
+
+DBMS_OUTPUT.put_line('Job finished in ' || TO_CHAR( ROUND((DBMS_UTILITY.get_time - l_start_time0)/100,2) )||'s');  
+COMMIT;  
+        
+EXCEPTION
+
+WHEN OTHERS THEN
+
+        ROLLBACK;
+        v_errm := SUBSTR(SQLERRM, 1 , 200);
+        INSERT INTO msg_cca VALUES (V_PROGRAM_NAME||':Error errmsg=>'||v_errm||' :: '||DBMS_UTILITY.format_error_backtrace,to_char(systimestamp,'dd-MON-yyyy hh24:mi:ss.FF'));
+        COMMIT;
+
+END PROC_GEN_OUTAGE_FILE;

@@ -1,0 +1,73 @@
+--select object_type,status,count(1) from user_objects group by object_type,status;
+--select * from user_scheduler_jobs where job_name='GENERATE_LUXURY_TAX_RECS';
+--select * from user_objects;
+
+@'E:\2 PRACTICE\league - Postgres\scripts\cleanup_schema.sql';
+	psql -U ankit -d postgres -a -f "E:\2 PRACTICE\league - Postgres\scripts\cleanup_schema.sql"
+@'E:\2 PRACTICE\league - Postgres\scripts\master.sql';
+	psql -U ankit -d postgres -a -f "E:\2 PRACTICE\league - Postgres\scripts\master.sql"
+--select fn_generate_data (8 , 15 , 70000000) from dual;
+
+
+@'E:\2 PRACTICE\league - Postgres\scripts\cleanup_schema.sql';
+@'E:\2 PRACTICE\league - Postgres\scripts\master.sql';
+
+--7	6	6	5	13
+select (select count(1) from pg_tables where tableowner='ankit') as tables,
+(select count(1) from pg_proc where proname like '%fn_trg_%') as trigger_fns,
+(select count(1) from pg_trigger where tgfoid in (select oid from pg_proc where proname like '%fn_trg_%')) as triggers,
+(select count(1) from pg_sequences where sequenceowner='ankit') as seq ,
+(select count(1) from information_schema.routines where routine_name like 'fn_%' or routine_name like '%proc_lux_tax%' or  routine_name like '%trunc_tbl%') as func;
+
+--REPLICATION
+	@'E:\2 PRACTICE\league - Postgres\scripts\REP_cleanup_schema_REP.sql';
+	@'E:\2 PRACTICE\league - Postgres\scripts\REP_master_REP.sql';
+
+	--66	0	0     to    73	5	7
+	select (select count(1) from pg_tables where tableowner='postgres') as tables,
+	(select count(1) from pg_sequences where sequenceowner='postgres') as seq ,
+	(select count(1) from information_schema.routines where routine_name like 'fn_%' or routine_name like '%proc_lux_tax%' or  routine_name like '%trunc_tbl%') as func;
+
+===========================================================================================================================================================================
+
+
+select * from league_season_t;
+select * from teams_t;
+select * from players_t;
+select * from contracts_t;
+select * from trade_hist_t;
+
+select * from POSITIONS_T;
+select * from PLAYER_POSITIONS_T;
+
+select team_id,sum(annual_contract_value) TOTAL_Contract_value
+, SUM(CASE WHEN injured_flag='N' THEN annual_contract_value ELSE 0 END) NON_INJURED_Contract_value 
+, SUM(CASE WHEN injured_flag='N' THEN 1 ELSE 0 END) VALID_player_count 
+,SUM(CASE WHEN injured_flag='Y' THEN 1 ELSE 0 END) INJURED_COUNT
+, SUM(CASE WHEN injured_flag='Y' THEN annual_contract_value ELSE 0 END) INJURED_Contract_value 
+from contracts_t  group by team_id order by team_id  ; 
+
+
+select * from table (fn_lux_tax);
+--BEGIN DBMS_SCHEDULER.run_job (job_name            =>'GENERATE_LUXURY_TAX_RECS');  END;
+
+
+SELECT player_id, playing_position,annual_contract_value,injured_flag from contracts_t where team_id=5 and injured_flag='N' order by annual_contract_value desc;
+select * from table (fn_ret_expensive_lineup(5));
+
+select fn_toggle_injured(218) from dual;
+
+
+select * from TRADE_HIST_T;
+    --delete from TRADE_HIST_T where player_id=210;
+select * from fn_trade_pl (6 ,'187,188', 8,'210,211') ; 
+
+SELECT player_id, playing_position,annual_contract_value,injured_flag from contracts_t where player_id in (102,103,209,220);
+SELECT player_id, playing_position,annual_contract_value,injured_flag from contracts_t where team_id=8 and injured_flag='N' ;
+
+
+
+
+
+
+

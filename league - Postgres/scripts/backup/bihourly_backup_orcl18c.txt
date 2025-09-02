@@ -1,0 +1,24 @@
+
+
+run {    
+	
+	ALLOCATE CHANNEL c1 DEVICE TYPE disk;
+	ALLOCATE CHANNEL c2 DEVICE TYPE disk;
+	ALLOCATE CHANNEL c3 DEVICE TYPE disk;
+	ALLOCATE CHANNEL c4 DEVICE TYPE disk;
+	CONFIGURE DEVICE TYPE DISK PARALLELISM 4 BACKUP TYPE TO BACKUPSET;
+
+	configure controlfile autobackup on;
+	backup AS COMPRESSED BACKUPSET full database tag ORCL_FULL format 'C:\BLMS\league\scripts\backup\%d_%T_%s_%p_FULL' ;
+	backup tag ORCL_CONTROL current controlfile format 'C:\BLMS\league\scripts\backup\%d_%T_%s_%p_CONTROL';
+
+	RELEASE CHANNEL c1;
+	RELEASE CHANNEL c2;
+	RELEASE CHANNEL c3;
+	RELEASE CHANNEL c4;
+}
+
+
+exit;
+
+

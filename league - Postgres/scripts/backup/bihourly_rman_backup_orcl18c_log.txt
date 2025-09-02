@@ -1,0 +1,65 @@
+
+Recovery Manager: Release 18.0.0.0.0 - Production on Sun Sep 6 16:57:45 2020
+Version 18.3.0.0.0
+
+Copyright (c) 1982, 2018, Oracle and/or its affiliates.  All rights reserved.
+
+connected to target database: ORCL18C (DBID=571951895)
+
+RMAN> 
+RMAN> 
+RMAN> run {    
+2> 	
+3> 	ALLOCATE CHANNEL c1 DEVICE TYPE disk;
+4> 	ALLOCATE CHANNEL c2 DEVICE TYPE disk;
+5> 	ALLOCATE CHANNEL c3 DEVICE TYPE disk;
+6> 	ALLOCATE CHANNEL c4 DEVICE TYPE disk;
+7> 	CONFIGURE DEVICE TYPE DISK PARALLELISM 4 BACKUP TYPE TO BACKUPSET;
+8> 
+9> 	configure controlfile autobackup on;
+10> 	backup AS COMPRESSED BACKUPSET full database tag ORCL_FULL format 'C:\BLMS\league\scripts\backup\%d_%T_%s_%p_FULL' ;
+11> 	backup tag ORCL_CONTROL current controlfile format 'C:\BLMS\league\scripts\backup\%d_%T_%s_%p_CONTROL';
+12> 
+13> 	RELEASE CHANNEL c1;
+14> 	RELEASE CHANNEL c2;
+15> 	RELEASE CHANNEL c3;
+16> 	RELEASE CHANNEL c4;
+17> }
+18> 
+19> 
+20> exit;
+using target database control file instead of recovery catalog
+allocated channel: c1
+channel c1: SID=142 device type=DISK
+
+allocated channel: c2
+channel c2: SID=387 device type=DISK
+
+allocated channel: c3
+channel c3: SID=14 device type=DISK
+
+allocated channel: c4
+channel c4: SID=278 device type=DISK
+
+old RMAN configuration parameters:
+CONFIGURE DEVICE TYPE DISK PARALLELISM 1 BACKUP TYPE TO COMPRESSED BACKUPSET;
+new RMAN configuration parameters:
+CONFIGURE DEVICE TYPE DISK PARALLELISM 4 BACKUP TYPE TO BACKUPSET;
+new RMAN configuration parameters are successfully stored
+
+new RMAN configuration parameters:
+CONFIGURE CONTROLFILE AUTOBACKUP ON;
+new RMAN configuration parameters are successfully stored
+
+Starting backup at 06-SEP-20
+released channel: c1
+released channel: c2
+released channel: c3
+released channel: c4
+RMAN-00571: ===========================================================
+RMAN-00569: =============== ERROR MESSAGE STACK FOLLOWS ===============
+RMAN-00571: ===========================================================
+RMAN-03002: failure of backup command at 09/06/2020 16:57:51
+RMAN-06149: cannot BACKUP DATABASE in NOARCHIVELOG mode
+
+Recovery Manager complete.
