@@ -1,0 +1,150 @@
+-- Data checks
+-- We need to do some data checks on several tables. We use function call with dynamic queries to loop over different tables.
+-- Also, fn returns result set-of record TYPE same as the required output format.
+
+-- USAGE:  select * from fn_data_checks_details() ;
+
+/*
+drop TYPE type_ecol_mon_data_checks_details;
+create TYPE type_ecol_mon_data_checks_details  AS
+(error_description TEXT,method VARCHAR, country VARCHAR, habitat VARCHAR, management_unit VARCHAR, management_unit_orig VARCHAR,
+ 				management_name VARCHAR,management_name_orig VARCHAR, site_name VARCHAR,partner VARCHAR,partner_orig VARCHAR,
+ 				data_origin VARCHAR,bleached_coral_cov TEXT,cca_cov TEXT,cyanob_cov TEXT,epiphyte_cov TEXT,
+ 				hard_coral_live_cov VARCHAR,macroalgae_cov VARCHAR,other_cov VARCHAR,other_inverts_cov TEXT,rock_bare_substrate_cov VARCHAR,
+ 				rubble_cov VARCHAR,sand_cov VARCHAR,seagrass_cov VARCHAR,soft_coral_cov VARCHAR,species_cov TEXT,turf_algae_cov TEXT,
+ 				unrecorded_cov TEXT,total_cov NUMERIC, id INT) ;*/
+
+
+-- drop function fn_data_checks_details()
+CREATE OR REPLACE FUNCTION fn_data_checks_details ()
+ RETURNS SETOF type_ecol_mon_data_checks_details
+ LANGUAGE plpgsql
+AS $function$
+declare
+    rec type_ecol_mon_data_checks_details; cat_rec RECORD;
+begin
+		-- total_cov is present only in ecol_mon_manta_tow_clean & _summary_clean tables
+		FOR cat_rec IN (SELECT table_name tab,column_name col from information_schema.columns
+  						 WHERE (table_name LIKE 'ecol_mon_%summary_clean' OR
+							   table_name = 'ecol_mon_manta_tow_clean' )
+					       AND column_name IN ('total_cov') ) LOOP
+				BEGIN
+					FOR rec IN
+					EXECUTE
+					FORMAT('SELECT ''total_cov DOES NOT EQUAL 100'' as description,method, country, habitat, management_unit, management_unit_orig,
+								management_name,management_name_orig, site_name, partner,partner_orig,data_origin,
+								NULL AS bleached_coral_cov,NULL AS cca_cov,NULL AS cyanob_cov,NULL AS epiphyte_cov,
+								NULL AS hard_coral_live_cov, NULL AS macroalgae_cov, NULL AS other_cov,NULL AS other_inverts_cov,
+								NULL AS rock_bare_substrate_cov,NULL AS rubble_cov,NULL AS sand_cov,NULL AS seagrass_cov,
+								NULL AS soft_coral_cov,NULL AS species_cov, NULL AS turf_algae_cov,NULL AS unrecorded_cov,
+								total_cov, NULL id
+							FROM %s
+							WHERE total_cov::real  != 100 ',cat_rec.tab,cat_rec.tab)
+				LOOP
+					RETURN NEXT rec;
+				END LOOP;
+
+				EXCEPTION
+					WHEN OTHERS THEN
+						RAISE NOTICE 'EXCEPTION For total_cov - %s:%',cat_rec.tab,SQLERRM||' '||SQLSTATE;
+				END;
+		END LOOP;
+
+		-- Validate partner, management_name AND site_name in all ecol_ tables
+		FOR cat_rec IN (SELECT DISTINCT table_name tab from information_schema.columns
+  					     WHERE table_name LIKE 'ecol_mon_%_clean' ) LOOP
+
+				-- partner
+				BEGIN
+					FOR rec IN
+					EXECUTE
+					FORMAT('SELECT ''partner/management_unit MISMATCH'' as description,method, country, habitat, management_unit, management_unit_orig,
+								management_name,management_name_orig, site_name, partner,partner_orig,data_origin,
+								NULL AS bleached_coral_cov,NULL AS cca_cov,NULL AS cyanob_cov,NULL AS epiphyte_cov,
+								NULL AS hard_coral_live_cov, NULL AS macroalgae_cov, NULL AS other_cov,NULL AS other_inverts_cov,
+								NULL AS rock_bare_substrate_cov,NULL AS rubble_cov,NULL AS sand_cov,NULL AS seagrass_cov,
+								NULL AS soft_coral_cov,NULL AS species_cov, NULL AS turf_algae_cov,NULL AS unrecorded_cov,
+								NULL AS total_cov, NULL id
+							  FROM %s bp
+							WHERE partner IS NOT NULL AND management_unit IS NOT NULL
+							  AND management_name IS NOT NULL AND site_name IS NOT NULL
+							  AND NOT EXISTS (SELECT 1 FROM management_ref mr
+											 WHERE unit_name = bp.management_unit
+										       AND mr.country = bp.country
+											   AND mr.partner_id = bp.partner
+											)',cat_rec.tab,cat_rec.tab)
+					LOOP
+						RETURN NEXT rec;
+					END LOOP;
+
+				EXCEPTION
+					WHEN OTHERS THEN
+						RAISE NOTICE 'EXCEPTION For partner - %s:%',cat_rec.tab,SQLERRM||' '||SQLSTATE;
+				END;
+
+				-- management_name
+				BEGIN
+					FOR rec IN
+					EXECUTE
+					FORMAT('SELECT ''management_name/management_unit MISMATCH'' as description,method, country, habitat, management_unit, management_unit_orig,
+								management_name,management_name_orig, site_name, partner,partner_orig,data_origin,
+								NULL AS bleached_coral_cov,NULL AS cca_cov,NULL AS cyanob_cov,NULL AS epiphyte_cov,
+								NULL AS hard_coral_live_cov, NULL AS macroalgae_cov, NULL AS other_cov,NULL AS other_inverts_cov,
+								NULL AS rock_bare_substrate_cov,NULL AS rubble_cov,NULL AS sand_cov,NULL AS seagrass_cov,
+								NULL AS soft_coral_cov,NULL AS species_cov, NULL AS turf_algae_cov,NULL AS unrecorded_cov,
+								NULL AS total_cov, NULL id
+							  FROM %s bp
+							WHERE partner IS NOT NULL AND management_unit IS NOT NULL
+							  AND management_name IS NOT NULL AND site_name IS NOT NULL
+							  AND NOT EXISTS (SELECT 1 FROM management_ref mr
+											 WHERE unit_name = bp.management_unit
+										       AND mr.country = bp.country
+											   AND mr.management_name = bp.management_name
+											)',cat_rec.tab,cat_rec.tab)
+					LOOP
+						RETURN NEXT rec;
+					END LOOP;
+
+				EXCEPTION
+					WHEN OTHERS THEN
+						RAISE NOTICE 'EXCEPTION For management_name - %s:%',cat_rec.rec.tab,SQLERRM||' '||SQLSTATE;
+				END;
+
+				-- site_name
+				BEGIN
+					FOR rec IN
+					EXECUTE
+					FORMAT('SELECT ''site/management_name MISMATCH'' as description,method, country, habitat, management_unit, management_unit_orig,
+								management_name,management_name_orig, site_name, partner,partner_orig,data_origin,
+								NULL AS bleached_coral_cov,NULL AS cca_cov,NULL AS cyanob_cov,NULL AS epiphyte_cov,
+								NULL AS hard_coral_live_cov, NULL AS macroalgae_cov, NULL AS other_cov,NULL AS other_inverts_cov,
+								NULL AS rock_bare_substrate_cov,NULL AS rubble_cov,NULL AS sand_cov,NULL AS seagrass_cov,
+								NULL AS soft_coral_cov,NULL AS species_cov, NULL AS turf_algae_cov,NULL AS unrecorded_cov,
+								NULL AS total_cov, NULL id
+							  FROM %s bp
+							WHERE partner IS NOT NULL AND management_unit IS NOT NULL
+							  AND management_name IS NOT NULL AND site_name IS NOT NULL
+							  AND NOT EXISTS (SELECT 1 FROM survey_site_ref ssr
+											  WHERE ssr.management_name = bp.management_name
+										        AND ssr.country = bp.country
+											    AND ssr.label = bp.site_name AND ssr.habitat = bp.habitat
+											)',cat_rec.tab,cat_rec.tab)
+					LOOP
+						RETURN NEXT rec;
+					END LOOP;
+				EXCEPTION
+					WHEN OTHERS THEN
+						RAISE NOTICE 'EXCEPTION For site_name - %s:%',cat_recrec.tab,SQLERRM||' '||SQLSTATE;
+				END;
+
+		END LOOP;  --- End of table, column name loop
+
+		RETURN;
+EXCEPTION
+		WHEN OTHERS THEN
+			INSERT INTO api_fetch_logging (form_name, start_dt, message)
+											VALUES('fn_data_checks_details', start_ts, 'ERROR: '||SQLERRM);
+			RAISE NOTICE 'Main fn EXCEPTION :%',SQLERRM||' '||SQLSTATE;
+END;
+$function$;
+
